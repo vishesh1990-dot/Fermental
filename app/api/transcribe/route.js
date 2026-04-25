@@ -1,11 +1,37 @@
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
-import fs from 'fs';
-import path from 'path';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+async function commitToGitHub(filename, content) {
+  const owner = process.env.GITHUB_OWNER;
+  const repo = process.env.GITHUB_REPO;
+  const token = process.env.GITHUB_TOKEN;
+  const filePath = `posts/${filename}`;
+
+  const encoded = Buffer.from(content).toString('base64');
+
+  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${filePath}`, {
+    method: 'PUT',
+    headers: {
+      Authorization: `token ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      message: `Add post: ${filename}`,
+      content: encoded,
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(`GitHub API error: ${err.message}`);
+  }
+
+  return await res.json();
+}
 
 export async function POST(request) {
   try {
@@ -17,28 +43,21 @@ export async function POST(request) {
       return NextResponse.json({ error: 'No audio file provided' }, { status: 400 });
     }
 
-    // Convert audio to buffer
     const bytes = await audioFile.arrayBuffer();
     const buffer = Buffer.from(bytes);
 
-    // Save temp file for Whisper
-    const tempPath = path.join('/tmp', `audio-${Date.now()}.webm`);
-    fs.writeFileSync(tempPath, buffer);
-
     // Transcribe with Whisper
     const transcription = await openai.audio.transcriptions.create({
-      file: fs.createReadStream(tempPath),
+      file: new File([buffer], 'recording.webm', { type: 'audio/webm' }),
       model: 'whisper-1',
     });
 
-    fs.unlinkSync(tempPath);
-
     const rawTranscript = transcription.text;
 
-    // Format with Claude based on touch level
+    // Format with Claude
     const systemPrompt = touchLevel === 'minimal'
-      ? `You are a text formatter. Only add punctuation and paragraph breaks to the transcript. Do not change any words. Do not add or remove content. Return only the formatted text.`
-      : `You are a text formatter. Remove filler words (um, uh, you know, like when used as filler). Add proper punctuation and paragraph breaks. Do not change the person's actual words, tone, or meaning. Do not add introductions or conclusions they didn't say. Return only the formatted text.`;
+      ? `You are a text formatter. Only add punctuation and paragraph breaks. Do not change any words. Return only the formatted text.`
+      : `You are a text formatter. Remove filler words (um, uh, you know, like when used as filler). Add proper punctuation and paragraph breaks. Do not change the person's actual words or tone. Return only the formatted text.`;
 
     const formatted = await anthropic.messages.create({
       model: 'claude-sonnet-4-5',
@@ -49,7 +68,7 @@ export async function POST(request) {
 
     const formattedText = formatted.content[0].text;
 
-    // Generate title and excerpt with Claude
+    // Generate title and excerpt
     const meta = await anthropic.messages.create({
       model: 'claude-sonnet-4-5',
       max_tokens: 200,
@@ -67,7 +86,6 @@ export async function POST(request) {
       excerpt = formattedText.slice(0, 100);
     }
 
-    // Create slug from title
     const slug = title
       .toLowerCase()
       .replace(/[^a-z0-9\s]/g, '')
@@ -76,7 +94,6 @@ export async function POST(request) {
 
     const date = new Date().toISOString().split('T')[0];
 
-    // Create markdown file
     const markdown = `---
 title: "${title}"
 date: "${date}"
@@ -85,8 +102,8 @@ excerpt: "${excerpt}"
 
 ${formattedText}`;
 
-    const filePath = path.join(process.cwd(), 'posts', `${slug}.md`);
-    fs.writeFileSync(filePath, markdown);
+    // Commit to GitHub — Vercel auto-deploys after this
+    await commitToGitHub(`${slug}.md`, markdown);
 
     return NextResponse.json({
       success: true,
@@ -98,7 +115,7 @@ ${formattedText}`;
     });
 
   } catch (error) {
-    console.error('Transcription error:', error);
+    console.error('Error:', error);
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
