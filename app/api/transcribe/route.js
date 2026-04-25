@@ -10,7 +10,6 @@ async function commitToGitHub(filename, content) {
   const repo = process.env.GITHUB_REPO;
   const token = process.env.GITHUB_TOKEN;
   const filePath = `posts/${filename}`;
-
   const encoded = Buffer.from(content).toString('base64');
 
   const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${filePath}`, {
@@ -46,7 +45,7 @@ export async function POST(request) {
     const bytes = await audioFile.arrayBuffer();
     const buffer = Buffer.from(bytes);
 
-    // Transcribe with Whisper
+    // Step 1 — Transcribe with Whisper
     const transcription = await openai.audio.transcriptions.create({
       file: new File([buffer], 'recording.webm', { type: 'audio/webm' }),
       model: 'whisper-1',
@@ -54,55 +53,80 @@ export async function POST(request) {
 
     const rawTranscript = transcription.text;
 
-    // Format with Claude
-    const systemPrompt = touchLevel === 'minimal'
-      ? `You are a text formatter. Only add punctuation and paragraph breaks. Do not change any words. Return only the formatted text.`
-      : `You are a text formatter. Remove filler words (um, uh, you know, like when used as filler). Add proper punctuation and paragraph breaks. Do not change the person's actual words or tone. Return only the formatted text.`;
+    // Step 2 — Turn into a real blog post with Claude
+    const blogSystemPrompt = touchLevel === 'minimal'
+      ? `You are a blog post formatter. The user has recorded a voice note. Your job:
+- Keep every word they said intact
+- Only fix punctuation, capitalisation, and paragraph breaks
+- Add a clear title that reflects what they spoke about
+- Do NOT add, remove, or rephrase any content
+- Structure it with natural paragraph breaks only
 
-    const formatted = await anthropic.messages.create({
+Return your response as JSON with these exact keys:
+{
+  "title": "Post title here",
+  "excerpt": "One sentence summary under 25 words",
+  "body": "Full formatted post body here"
+}
+Return only valid JSON. No markdown code blocks. No explanation.`
+      : `You are a blog post editor who preserves authentic voice. The user has recorded a voice note. Your job:
+- Remove filler words only (um, uh, you know, like when used as filler, basically, literally)
+- Fix punctuation and capitalisation
+- Break into natural paragraphs
+- Add a compelling title that reflects the content
+- Add natural section breaks if the content covers multiple ideas
+- Keep their exact words, tone, personality, and examples
+- Do NOT write a formal introduction or conclusion they didn't say
+- Do NOT add information they didn't mention
+- The post should read exactly like they speak, just cleaned up
+
+Return your response as JSON with these exact keys:
+{
+  "title": "Post title here",
+  "excerpt": "One sentence summary under 25 words",
+  "body": "Full formatted post body here with markdown paragraph breaks"
+}
+Return only valid JSON. No markdown code blocks. No explanation.`;
+
+    const blogResponse = await anthropic.messages.create({
       model: 'claude-sonnet-4-5',
-      max_tokens: 2000,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: rawTranscript }],
+      max_tokens: 3000,
+      system: blogSystemPrompt,
+      messages: [{ role: 'user', content: `Here is the voice transcript to turn into a blog post:\n\n${rawTranscript}` }],
     });
 
-    const formattedText = formatted.content[0].text;
-
-    // Generate title and excerpt
-    const meta = await anthropic.messages.create({
-      model: 'claude-sonnet-4-5',
-      max_tokens: 200,
-      system: 'Return only valid JSON with keys: title (string, max 10 words), excerpt (string, max 20 words). No markdown, no explanation.',
-      messages: [{ role: 'user', content: formattedText }],
-    });
-
-    let title, excerpt;
+    let title, excerpt, body;
     try {
-      const parsed = JSON.parse(meta.content[0].text);
+      const responseText = blogResponse.content[0].text.trim();
+      const parsed = JSON.parse(responseText);
       title = parsed.title;
       excerpt = parsed.excerpt;
+      body = parsed.body;
     } catch {
+      // Fallback if JSON parse fails
       title = 'New Post';
-      excerpt = formattedText.slice(0, 100);
+      excerpt = rawTranscript.slice(0, 120);
+      body = rawTranscript;
     }
 
     const slug = title
       .toLowerCase()
       .replace(/[^a-z0-9\s]/g, '')
       .replace(/\s+/g, '-')
-      .slice(0, 50);
+      .slice(0, 60)
+      + '-' + Date.now().toString().slice(-4);
 
     const date = new Date().toISOString().split('T')[0];
 
     const markdown = `---
-title: "${title}"
+title: "${title.replace(/"/g, "'")}"
 date: "${date}"
-excerpt: "${excerpt}"
+excerpt: "${excerpt.replace(/"/g, "'")}"
 ---
 
-${formattedText}`;
+${body}`;
 
-    // Commit to GitHub — Vercel auto-deploys after this
+    // Step 3 — Commit to GitHub → Vercel auto-deploys
     await commitToGitHub(`${slug}.md`, markdown);
 
     return NextResponse.json({
@@ -111,7 +135,7 @@ ${formattedText}`;
       title,
       excerpt,
       transcript: rawTranscript,
-      formatted: formattedText,
+      formatted: body,
     });
 
   } catch (error) {
