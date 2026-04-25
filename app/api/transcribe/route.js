@@ -41,7 +41,7 @@ export async function POST(request) {
       : `You are a text formatter. Remove filler words (um, uh, you know, like when used as filler). Add proper punctuation and paragraph breaks. Do not change the person's actual words, tone, or meaning. Do not add introductions or conclusions they didn't say. Return only the formatted text.`;
 
     const formatted = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-5',
       max_tokens: 2000,
       system: systemPrompt,
       messages: [{ role: 'user', content: rawTranscript }],
@@ -51,7 +51,7 @@ export async function POST(request) {
 
     // Generate title and excerpt with Claude
     const meta = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-5',
       max_tokens: 200,
       system: 'Return only valid JSON with keys: title (string, max 10 words), excerpt (string, max 20 words). No markdown, no explanation.',
       messages: [{ role: 'user', content: formattedText }],
